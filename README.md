@@ -51,6 +51,25 @@ To place it at a specific spot on the bar:
 omarchy plugin enable bagareal.keybindings --before omarchy.agents
 ```
 
+## Removal
+
+To temporarily hide it from the bar but keep it installed:
+
+```bash
+omarchy plugin disable bagareal.keybindings
+```
+
+To remove it completely:
+
+```bash
+omarchy plugin remove bagareal.keybindings
+```
+
+This does not delete your saved favorites
+(`~/.local/state/omarchy/settings/bagareal-keybindings-favorites.json`) or
+the keybinding you may have added to `~/.config/hypr/bindings.lua` — remove
+those by hand if you want a full cleanup.
+
 ## Suggested keybinding
 
 The plugin doesn't bind a hotkey for you — add one yourself in
