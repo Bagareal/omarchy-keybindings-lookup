@@ -1,8 +1,11 @@
 # Keybindings Lookup
 
 An Omarchy shell bar-widget that puts a searchable, favoritable reference of
-your Hyprland keybindings one click away — no more opening `SUPER + K` and
-scrolling to find the one you half-remember.
+your Hyprland keybindings one click away, so the ones you use most aren't
+a search away every time.
+
+![Favorites tab](screenshots/favorites.png)
+![Defaults tab](screenshots/defaults.png)
 
 ## Features
 
@@ -17,6 +20,8 @@ scrolling to find the one you half-remember.
   you arrange them however you like; the order is saved
 - **6 rows visible, scrolls for more** — the popup stays compact instead of
   growing into a wall of text
+- **Tab to switch tabs** — while the popup is open, `Tab` / `Shift+Tab` flips
+  between Favorites and Defaults without touching the mouse
 - Read-only: clicking a row never executes the binding, it's a reference
   only
 
@@ -45,6 +50,17 @@ To place it at a specific spot on the bar:
 ```bash
 omarchy plugin enable bagareal.keybindings --before omarchy.agents
 ```
+
+## Suggested keybinding
+
+The plugin doesn't bind a hotkey for you — add one yourself in
+`~/.config/hypr/bindings.lua`:
+
+```lua
+o.bind("SUPER + CTRL + ALT + K", "Keybindings Lookup", "omarchy-shell shell toggle bagareal.keybindings")
+```
+
+Pick whatever combo is free on your system; check with `omarchy menu keybindings --print` first.
 
 ## What it reads and writes
 

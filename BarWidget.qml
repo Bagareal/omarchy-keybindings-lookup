@@ -90,11 +90,16 @@ BarWidget {
     onFileChanged: reload()
   }
 
-  property bool popupOpen: false
-  function close() { popupOpen = false }
+  // open()/close()/opened is the contract Bar.qml's findPanelWidget() looks
+  // for on a live bar-widget instance — it's what makes `omarchy-shell shell
+  // toggle <id>` (and therefore a Hyprland keybinding) able to summon this
+  // popup, the same mechanism first-party panels like clock/weather use.
+  property bool opened: false
+  function open() { opened = true }
+  function close() { opened = false }
 
-  onPopupOpenChanged: {
-    if (popupOpen) {
+  onOpenedChanged: {
+    if (opened) {
       refresh()
       filterText = ""
       activeTab = "Favorites"
@@ -129,7 +134,7 @@ BarWidget {
     bar: root.bar
     text: ""
     tooltipText: "Keybindings (click to search)"
-    onPressed: root.popupOpen = !root.popupOpen
+    onPressed: root.opened = !root.opened
   }
 
   KeyboardPanel {
@@ -137,7 +142,7 @@ BarWidget {
     anchorItem: root
     bar: root.bar
     owner: root
-    open: root.popupOpen
+    open: root.opened
     focusTarget: searchField
     contentWidth: popup.fittedContentWidth(Style.space(440))
     contentHeight: popup.fittedContentHeight(column.implicitHeight)
@@ -169,7 +174,15 @@ BarWidget {
         font.pixelSize: Style.font.body
         focus: true
         onTextChanged: root.filterText = text
-        Keys.onEscapePressed: root.popupOpen = false
+        Keys.onEscapePressed: root.opened = false
+        Keys.onTabPressed: function (event) {
+          root.activeTab = root.activeTab === "Favorites" ? "Defaults" : "Favorites"
+          event.accepted = true
+        }
+        Keys.onBacktabPressed: function (event) {
+          root.activeTab = root.activeTab === "Favorites" ? "Defaults" : "Favorites"
+          event.accepted = true
+        }
       }
 
       PanelSeparator { foreground: root.bar.foreground }
