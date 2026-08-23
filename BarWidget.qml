@@ -21,6 +21,20 @@ BarWidget {
   property string activeTab: "Favorites"
   property var favoriteIds: []
 
+  // Caps applied at parse time, before either the favorites JSON or the
+  // `omarchy menu keybindings --print` output is assigned to a property
+  // that feeds a QML model — both are unbounded-size inputs (a hand-edited
+  // or corrupted favorites file; a keybindings list that grows with configs)
+  // and JSON.parse / the ListView model would otherwise pay for whatever
+  // size lands on disk or on stdout.
+  readonly property int maxFavoritesBytes: 65536
+  readonly property int maxFavoritesItems: 500
+  readonly property int maxFavoriteStringLen: 300
+
+  readonly property int maxBindingsBytes: 262144
+  readonly property int maxBindingsItems: 2000
+  readonly property int maxBindingLineLen: 300
+
   // Defaults tab keeps the priority order from `omarchy menu keybindings`.
   // Favorites tab uses favoriteIds' own order, which moveFavorite() rewrites
   // — that's what makes the list user-reorderable. Stale ids (a favorited
@@ -72,9 +86,17 @@ BarWidget {
   }
 
   function parseFavorites(text) {
+    // Reject oversized files before they're handed to JSON.parse, so an
+    // adversarial or corrupted favorites file can't force an expensive
+    // parse of an arbitrarily large blob.
+    if (typeof text !== "string" || text.length > root.maxFavoritesBytes) return []
     try {
       var parsed = JSON.parse(text)
-      if (Array.isArray(parsed)) return parsed
+      if (!Array.isArray(parsed)) return []
+      return parsed
+        .filter(function (v) { return typeof v === "string" })
+        .slice(0, root.maxFavoritesItems)
+        .map(function (v) { return v.length > root.maxFavoriteStringLen ? v.slice(0, root.maxFavoriteStringLen) : v })
     } catch (e) {}
     return []
   }
@@ -120,7 +142,14 @@ BarWidget {
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: {
-        var lines = text.split("\n").filter(function (l) { return l.trim() !== "" })
+        // Cap total bytes, line count, and per-line length before any of
+        // this becomes ListView model rows — an unexpectedly huge
+        // `--print` output shouldn't turn into thousands of QML delegates.
+        var raw = text.length > root.maxBindingsBytes ? text.slice(0, root.maxBindingsBytes) : text
+        var lines = raw.split("\n")
+          .filter(function (l) { return l.trim() !== "" })
+          .slice(0, root.maxBindingsItems)
+          .map(function (l) { return l.length > root.maxBindingLineLen ? l.slice(0, root.maxBindingLineLen) : l })
         root.allBindings = lines
       }
     }
