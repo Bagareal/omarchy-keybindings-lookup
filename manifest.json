@@ -1,0 +1,20 @@
+{
+  "schemaVersion": 1,
+  "id": "bagareal.keybindings",
+  "name": "Keybindings Lookup",
+  "version": "1.0.0",
+  "author": "Bagareal",
+  "description": "Searchable Omarchy keybindings reference popup",
+  "kinds": [
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "barWidget": "BarWidget.qml"
+  },
+  "barWidget": {
+    "displayName": "Keybindings Lookup",
+    "description": "Searchable Omarchy keybindings reference popup",
+    "category": "System",
+    "allowMultiple": false
+  }
+}
