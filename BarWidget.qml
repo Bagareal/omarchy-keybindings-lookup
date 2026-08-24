@@ -21,12 +21,15 @@ BarWidget {
   property string activeTab: "Favorites"
   property var favoriteIds: []
 
-  // Caps applied at parse time, before either the favorites JSON or the
-  // `omarchy menu keybindings --print` output is assigned to a property
-  // that feeds a QML model — both are unbounded-size inputs (a hand-edited
-  // or corrupted favorites file; a keybindings list that grows with configs)
-  // and JSON.parse / the ListView model would otherwise pay for whatever
-  // size lands on disk or on stdout.
+  // Caps enforced on the producer side, before either input is fully
+  // materialized in memory — both are unbounded-size inputs (a hand-edited
+  // or corrupted favorites file; a keybindings list that grows with
+  // configs). The favorites file is size-checked with `stat` before
+  // FileView is ever pointed at it (FileView has no partial-read API, so
+  // the only way to avoid reading an oversized file whole is to not open
+  // it). The `--print` output is consumed line-by-line via SplitParser and
+  // the process is killed as soon as a cap is hit, instead of being
+  // buffered to completion via StdioCollector first.
   readonly property int maxFavoritesBytes: 65536
   readonly property int maxFavoritesItems: 500
   readonly property int maxFavoriteStringLen: 300
@@ -69,7 +72,7 @@ BarWidget {
     if (idx === -1) next.push(line)
     else next.splice(idx, 1)
     root.favoriteIds = next
-    favoritesFile.setText(JSON.stringify(next, null, 2) + "\n")
+    if (favoritesFile.path !== "") favoritesFile.setText(JSON.stringify(next, null, 2) + "\n")
   }
 
   function moveFavorite(line, direction) {
@@ -82,7 +85,7 @@ BarWidget {
     next[idx] = next[newIdx]
     next[newIdx] = tmp
     root.favoriteIds = next
-    favoritesFile.setText(JSON.stringify(next, null, 2) + "\n")
+    if (favoritesFile.path !== "") favoritesFile.setText(JSON.stringify(next, null, 2) + "\n")
   }
 
   function parseFavorites(text) {
@@ -101,15 +104,51 @@ BarWidget {
     return []
   }
 
+  readonly property string favoritesPath: Quickshell.env("HOME") + "/.local/state/omarchy/settings/bagareal-keybindings-favorites.json"
+
+  // FileView has no partial-read API — text() always materializes the
+  // whole file before we get a chance to look at it. So the size cap has
+  // to be enforced *before* FileView ever gets pointed at the path: stat
+  // it first, and only assign favoritesFile.path (which triggers a load)
+  // if it's within maxFavoritesBytes. An oversized file is left unopened;
+  // favoriteIds falls back to empty and writes are skipped (see
+  // toggleFavorite/moveFavorite) until the file is fixed externally.
+  function checkFavoritesSize() {
+    if (!favoritesStatProc.running) favoritesStatProc.running = true
+  }
+
+  Process {
+    id: favoritesStatProc
+    command: ["stat", "-c%s", root.favoritesPath]
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        var n = parseInt(text.trim(), 10)
+        // stat failing (e.g. ENOENT, no favorites saved yet) is not a size
+        // problem — let FileView take the path and handle it via
+        // onLoadFailed as before.
+        var withinCap = isNaN(n) || n <= root.maxFavoritesBytes
+        if (!withinCap) {
+          console.warn("bagareal.keybindings: favorites file exceeds " + root.maxFavoritesBytes + " bytes (" + n + "); refusing to load")
+          favoritesFile.path = ""
+          root.favoriteIds = []
+        } else if (favoritesFile.path !== root.favoritesPath) {
+          favoritesFile.path = root.favoritesPath
+        } else {
+          favoritesFile.reload()
+        }
+      }
+    }
+  }
+
   FileView {
     id: favoritesFile
-    path: Quickshell.env("HOME") + "/.local/state/omarchy/settings/bagareal-keybindings-favorites.json"
     watchChanges: true
     atomicWrites: true
     printErrors: false
     onLoaded: root.favoriteIds = root.parseFavorites(text())
     onLoadFailed: root.favoriteIds = []
-    onFileChanged: reload()
+    onFileChanged: root.checkFavoritesSize()
   }
 
   // open()/close()/opened is the contract Bar.qml's findPanelWidget() looks
@@ -129,8 +168,15 @@ BarWidget {
     }
   }
 
+  property var _bindingsLines: []
+  property int _bindingsBytes: 0
+
   function refresh() {
-    if (!bindingsProc.running) bindingsProc.running = true
+    if (!bindingsProc.running) {
+      root._bindingsLines = []
+      root._bindingsBytes = 0
+      bindingsProc.running = true
+    }
   }
 
   implicitWidth: button.implicitWidth
@@ -139,23 +185,35 @@ BarWidget {
   Process {
     id: bindingsProc
     command: ["omarchy", "menu", "keybindings", "--print"]
-    stdout: StdioCollector {
-      waitForEnd: true
-      onStreamFinished: {
-        // Cap total bytes, line count, and per-line length before any of
-        // this becomes ListView model rows — an unexpectedly huge
-        // `--print` output shouldn't turn into thousands of QML delegates.
-        var raw = text.length > root.maxBindingsBytes ? text.slice(0, root.maxBindingsBytes) : text
-        var lines = raw.split("\n")
-          .filter(function (l) { return l.trim() !== "" })
-          .slice(0, root.maxBindingsItems)
-          .map(function (l) { return l.length > root.maxBindingLineLen ? l.slice(0, root.maxBindingLineLen) : l })
-        root.allBindings = lines
+    stdout: SplitParser {
+      splitMarker: "\n"
+      // Consumed line-by-line as the process produces it, rather than
+      // buffered whole via StdioCollector — an unexpectedly huge `--print`
+      // output gets its process killed the moment a cap is hit instead of
+      // being fully read into memory first.
+      onRead: function (line) {
+        if (!bindingsProc.running) return
+        var trimmed = line.trim()
+        if (trimmed === "") return
+        if (root._bindingsLines.length >= root.maxBindingsItems
+            || root._bindingsBytes + trimmed.length > root.maxBindingsBytes) {
+          bindingsProc.running = false
+          return
+        }
+        var capped = trimmed.length > root.maxBindingLineLen ? trimmed.slice(0, root.maxBindingLineLen) : trimmed
+        root._bindingsBytes += capped.length
+        root._bindingsLines.push(capped)
       }
+    }
+    onExited: {
+      root.allBindings = root._bindingsLines
     }
   }
 
-  Component.onCompleted: refresh()
+  Component.onCompleted: {
+    root.checkFavoritesSize()
+    refresh()
+  }
 
   BarIconButton {
     id: button
