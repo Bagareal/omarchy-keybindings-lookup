@@ -24,12 +24,11 @@ BarWidget {
   // Caps enforced on the producer side, before either input is fully
   // materialized in memory — both are unbounded-size inputs (a hand-edited
   // or corrupted favorites file; a keybindings list that grows with
-  // configs). The favorites file is size-checked with `stat` before
-  // FileView is ever pointed at it (FileView has no partial-read API, so
-  // the only way to avoid reading an oversized file whole is to not open
-  // it). The `--print` output is consumed line-by-line via SplitParser and
-  // the process is killed as soon as a cap is hit, instead of being
-  // buffered to completion via StdioCollector first.
+  // configs). The favorites file is read through a descriptor-bound
+  // no-follow helper rather than FileView (see favoritesReaderScript
+  // below for why). The `--print` output is consumed line-by-line via
+  // SplitParser and the process is killed as soon as a cap is hit, instead
+  // of being buffered to completion via StdioCollector first.
   readonly property int maxFavoritesBytes: 65536
   readonly property int maxFavoritesItems: 500
   readonly property int maxFavoriteStringLen: 300
@@ -72,7 +71,7 @@ BarWidget {
     if (idx === -1) next.push(line)
     else next.splice(idx, 1)
     root.favoriteIds = next
-    if (favoritesFile.path !== "") favoritesFile.setText(JSON.stringify(next, null, 2) + "\n")
+    favoritesFile.setText(JSON.stringify(next, null, 2) + "\n")
   }
 
   function moveFavorite(line, direction) {
@@ -85,7 +84,7 @@ BarWidget {
     next[idx] = next[newIdx]
     next[newIdx] = tmp
     root.favoriteIds = next
-    if (favoritesFile.path !== "") favoritesFile.setText(JSON.stringify(next, null, 2) + "\n")
+    favoritesFile.setText(JSON.stringify(next, null, 2) + "\n")
   }
 
   function parseFavorites(text) {
@@ -106,49 +105,78 @@ BarWidget {
 
   readonly property string favoritesPath: Quickshell.env("HOME") + "/.local/state/omarchy/settings/bagareal-keybindings-favorites.json"
 
-  // FileView has no partial-read API — text() always materializes the
-  // whole file before we get a chance to look at it. So the size cap has
-  // to be enforced *before* FileView ever gets pointed at the path: stat
-  // it first, and only assign favoritesFile.path (which triggers a load)
-  // if it's within maxFavoritesBytes. An oversized file is left unopened;
-  // favoriteIds falls back to empty and writes are skipped (see
-  // toggleFavorite/moveFavorite) until the file is fixed externally.
-  function checkFavoritesSize() {
-    if (!favoritesStatProc.running) favoritesStatProc.running = true
+  // A stat-then-open check is still a race: whatever stat looked at can be
+  // swapped (e.g. for a symlink) before FileView performs its own,
+  // separate, path-based open. FileView also has no way to refuse
+  // following a symlink or reject a non-regular file (FIFO, socket,
+  // device), and opening a FIFO with no writer would hang the read.
+  //
+  // So favorites are never read through FileView at all. This Perl
+  // one-shot does a single syscall-level open with O_NOFOLLOW (a
+  // symlinked path is refused, not followed) and O_NONBLOCK (a FIFO with
+  // no writer returns immediately instead of hanging), then fstats *that
+  // file descriptor* — not the path again — to confirm it's a regular
+  // file, and reads at most maxFavoritesBytes+1 bytes from the same
+  // descriptor. Check and read are bound to one fd, so nothing can be
+  // substituted in between. Exit codes: 0 ok (stdout has the content, or
+  // nothing if the file doesn't exist yet), 1 open refused, 2 not a
+  // regular file, 3 over the byte cap.
+  //
+  // FileView is only used to *write* favorites (content we generate
+  // ourselves, already bounded by maxFavoritesItems/maxFavoriteStringLen);
+  // preload is off so it never performs a read of its own.
+  readonly property string favoritesReaderScript: `
+use strict;
+use warnings;
+use Fcntl qw(O_RDONLY O_NOFOLLOW O_NONBLOCK);
+use Errno qw(ENOENT);
+my ($path, $cap) = @ARGV;
+my $fh;
+unless (sysopen($fh, $path, O_RDONLY | O_NOFOLLOW | O_NONBLOCK)) {
+  exit($! == ENOENT ? 0 : 1);
+}
+unless (-f $fh) {
+  exit(2);
+}
+my $data = "";
+while (length($data) <= $cap) {
+  my $n = sysread($fh, $data, $cap + 1 - length($data), length($data));
+  last unless $n;
+}
+exit(3) if length($data) > $cap;
+print $data;
+`
+
+  function loadFavorites() {
+    if (!favoritesReadProc.running) favoritesReadProc.running = true
   }
 
   Process {
-    id: favoritesStatProc
-    command: ["stat", "-c%s", root.favoritesPath]
+    id: favoritesReadProc
+    command: ["perl", "-e", root.favoritesReaderScript, "--", root.favoritesPath, String(root.maxFavoritesBytes)]
     stdout: StdioCollector {
+      id: favoritesCollector
       waitForEnd: true
-      onStreamFinished: {
-        var n = parseInt(text.trim(), 10)
-        // stat failing (e.g. ENOENT, no favorites saved yet) is not a size
-        // problem — let FileView take the path and handle it via
-        // onLoadFailed as before.
-        var withinCap = isNaN(n) || n <= root.maxFavoritesBytes
-        if (!withinCap) {
-          console.warn("bagareal.keybindings: favorites file exceeds " + root.maxFavoritesBytes + " bytes (" + n + "); refusing to load")
-          favoritesFile.path = ""
-          root.favoriteIds = []
-        } else if (favoritesFile.path !== root.favoritesPath) {
-          favoritesFile.path = root.favoritesPath
-        } else {
-          favoritesFile.reload()
-        }
+    }
+    onExited: function (exitCode, exitStatus) {
+      if (exitCode === 0) {
+        root.favoriteIds = root.parseFavorites(favoritesCollector.text)
+        return
       }
+      var reasons = {1: "open refused (permission denied or symlink)", 2: "not a regular file", 3: "exceeds " + root.maxFavoritesBytes + " bytes"}
+      console.warn("bagareal.keybindings: refusing to load favorites file (" + (reasons[exitCode] || ("exit " + exitCode)) + ")")
+      root.favoriteIds = []
     }
   }
 
   FileView {
     id: favoritesFile
+    path: root.favoritesPath
+    preload: false
     watchChanges: true
     atomicWrites: true
     printErrors: false
-    onLoaded: root.favoriteIds = root.parseFavorites(text())
-    onLoadFailed: root.favoriteIds = []
-    onFileChanged: root.checkFavoritesSize()
+    onFileChanged: root.loadFavorites()
   }
 
   // open()/close()/opened is the contract Bar.qml's findPanelWidget() looks
@@ -211,7 +239,7 @@ BarWidget {
   }
 
   Component.onCompleted: {
-    root.checkFavoritesSize()
+    root.loadFavorites()
     refresh()
   }
 
