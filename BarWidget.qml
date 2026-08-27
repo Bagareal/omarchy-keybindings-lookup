@@ -384,6 +384,13 @@ print $data;
             anchors.leftMargin: Style.space(6)
             anchors.verticalCenter: parent.verticalCenter
             text: row.keyCombo
+            // keyCombo comes from `omarchy menu keybindings --print`, i.e.
+            // ultimately from local Hyprland config — untrusted content.
+            // Without an explicit textFormat, Text.AutoText would sniff
+            // markup-shaped strings and render them as RichText, which can
+            // trigger local/network resource loads (e.g. <img src=...>)
+            // from inside this always-running bar widget.
+            textFormat: Text.PlainText
             color: root.bar.foreground
             font.family: root.bar.fontFamily
             font.pixelSize: Style.font.bodySmall
@@ -397,6 +404,7 @@ print $data;
             anchors.right: parent.right
             anchors.verticalCenter: parent.verticalCenter
             text: row.action
+            textFormat: Text.PlainText
             color: Qt.darker(root.bar.foreground, 1.25)
             font.family: root.bar.fontFamily
             font.pixelSize: Style.font.bodySmall
